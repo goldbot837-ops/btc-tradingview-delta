@@ -1,9 +1,8 @@
 import os
 import time
 import logging
-from typing import Optional, Dict, Any
-from fastapi import FastAPI, Request, HTTPException, status
-from pydantic import BaseModel, Field
+from typing import Dict
+from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
 from delta_client import DeltaExchangeClient
@@ -24,11 +23,9 @@ DELTA_BASE_URL = os.getenv("DELTA_BASE_URL", "https://cdn-ind.testnet.deltaex.or
 WEBHOOK_PASSPHRASE = os.getenv("WEBHOOK_PASSPHRASE", "")
 DEFAULT_SYMBOL = os.getenv("DEFAULT_SYMBOL", "BTCUSD")
 DEFAULT_ORDER_SIZE = int(os.getenv("DEFAULT_ORDER_SIZE", "1"))
-# EXECUTION_MODE: "reversal" (Buy closes short & opens long; Sell closes long & opens short)
-#                 "long_only" (Buy opens long; Sell only closes long, never shorts)
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "reversal").lower()
 
-app = FastAPI(title="TradingView Delta Exchange Automation", version="1.0.0")
+app = Flask(__name__)
 
 # In-memory deduplication cache: dict of {dedup_key: timestamp}
 _recent_alerts: Dict[str, float] = {}
@@ -36,74 +33,69 @@ DEDUP_WINDOW_SECONDS = 30  # Ignore duplicate identical alerts within 30 seconds
 
 def get_delta_client() -> DeltaExchangeClient:
     if not DELTA_API_KEY or not DELTA_API_SECRET:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Delta Exchange API credentials are not configured in environment variables."
-        )
+        raise RuntimeError("Delta Exchange API credentials are not configured in environment variables.")
     return DeltaExchangeClient(
         api_key=DELTA_API_KEY,
         api_secret=DELTA_API_SECRET,
         base_url=DELTA_BASE_URL
     )
 
-class WebhookPayload(BaseModel):
-    action: str = Field(..., description="'buy' or 'sell'")
-    symbol: Optional[str] = Field(None, description="e.g., BTCUSD")
-    size: Optional[int] = Field(None, description="Number of contracts. Defaults to DEFAULT_ORDER_SIZE if not given.")
-    passphrase: Optional[str] = Field(None, description="Secret token to authenticate TradingView webhook")
-    bar_time: Optional[str] = Field(None, description="Bar timestamp from TradingView, e.g., {{time}}")
-    alert_id: Optional[str] = Field(None, description="Unique alert identifier, e.g., {{timenow}}")
-
-@app.get("/")
+@app.route("/", methods=["GET"])
 def root():
-    return {
+    return jsonify({
         "status": "online",
         "service": "TradingView to Delta Exchange Demo Bot",
         "execution_mode": EXECUTION_MODE,
         "default_symbol": DEFAULT_SYMBOL
-    }
+    })
 
-@app.get("/health")
+@app.route("/health", methods=["GET"])
 def health_check():
-    return {"status": "ok", "timestamp": int(time.time())}
+    return jsonify({"status": "ok", "timestamp": int(time.time())}), 200
 
-@app.get("/status")
+@app.route("/status", methods=["GET"])
 def account_status():
     """Fetches wallet balances and current positions from Delta Exchange Demo."""
-    client = get_delta_client()
     try:
+        client = get_delta_client()
         balance = client.get_wallet_balances()
         positions = client.get_positions()
-        return {
+        return jsonify({
             "success": True,
             "wallet": balance,
             "positions": positions
-        }
+        }), 200
     except Exception as e:
         logger.error(f"Failed to query Delta status: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return jsonify({"success": False, "error": str(e)}), 500
 
-@app.post("/webhook")
-async def receive_tradingview_alert(payload: WebhookPayload, request: Request):
-    logger.info(f"Received webhook: {payload.dict(exclude={'passphrase'})}")
+@app.route("/webhook", methods=["POST"])
+def receive_tradingview_alert():
+    data = request.get_json(force=True, silent=True)
+    if not data or not isinstance(data, dict):
+        return jsonify({"error": "Invalid or missing JSON payload"}), 400
+
+    logger.info(f"Received webhook: { {k: v for k, v in data.items() if k != 'passphrase'} }")
 
     # 1. Authenticate Passphrase if configured
-    if WEBHOOK_PASSPHRASE and payload.passphrase != WEBHOOK_PASSPHRASE:
+    if WEBHOOK_PASSPHRASE and data.get("passphrase") != WEBHOOK_PASSPHRASE:
         logger.warning("Unauthorized webhook call: Passphrase mismatch.")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid passphrase")
+        return jsonify({"error": "Invalid passphrase"}), 401
 
-    action = payload.action.strip().lower()
+    action = str(data.get("action", "")).strip().lower()
     if action not in ["buy", "sell"]:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Invalid action: {payload.action}. Must be 'buy' or 'sell'.")
+        return jsonify({"error": f"Invalid action: {action}. Must be 'buy' or 'sell'."}), 400
 
-    symbol = (payload.symbol or DEFAULT_SYMBOL).strip().upper()
-    order_size = payload.size if payload.size and payload.size > 0 else DEFAULT_ORDER_SIZE
+    symbol = str(data.get("symbol") or DEFAULT_SYMBOL).strip().upper()
+    try:
+        order_size = int(data.get("size")) if data.get("size") else DEFAULT_ORDER_SIZE
+    except (ValueError, TypeError):
+        order_size = DEFAULT_ORDER_SIZE
 
     # 2. Duplicate Alert Protection (Idempotency)
-    # Deduplication key combines symbol, action, and alert_id or bar_time
     now = time.time()
-    dedup_identifier = payload.alert_id or payload.bar_time or f"{action}_{int(now // DEDUP_WINDOW_SECONDS)}"
-    dedup_key = f"{symbol}:{action}:{dedup_identifier}"
+    alert_id = data.get("alert_id") or data.get("bar_time") or f"{action}_{int(now // DEDUP_WINDOW_SECONDS)}"
+    dedup_key = f"{symbol}:{action}:{alert_id}"
 
     # Clean old cache entries
     expired_keys = [k for k, ts in _recent_alerts.items() if now - ts > DEDUP_WINDOW_SECONDS]
@@ -112,21 +104,21 @@ async def receive_tradingview_alert(payload: WebhookPayload, request: Request):
 
     if dedup_key in _recent_alerts:
         logger.warning(f"Duplicate alert detected and skipped: {dedup_key}")
-        return {
+        return jsonify({
             "success": True,
             "message": f"Duplicate alert ignored (received {now - _recent_alerts[dedup_key]:.1f}s ago).",
             "dedup_key": dedup_key
-        }
+        }), 200
 
     _recent_alerts[dedup_key] = now
 
     # 3. Execute Trade on Delta Exchange Demo
-    client = get_delta_client()
-    execution_log = []
-
     try:
+        client = get_delta_client()
+        execution_log = []
+
         if action == "buy":
-            # If reversal mode, close any open SHORT position first
+            # Close opposing short position first (if any)
             close_result = client.close_position(symbol)
             if close_result:
                 execution_log.append({"action": "close_short", "result": close_result})
@@ -142,11 +134,10 @@ async def receive_tradingview_alert(payload: WebhookPayload, request: Request):
 
         elif action == "sell":
             if EXECUTION_MODE == "long_only":
-                # In long-only mode, sell signal ONLY closes long positions
                 close_result = client.close_position(symbol)
                 execution_log.append({"action": "close_long_only", "result": close_result})
             else:
-                # In reversal mode, close any open LONG position first
+                # Close opposing long position first (if any)
                 close_result = client.close_position(symbol)
                 if close_result:
                     execution_log.append({"action": "close_long", "result": close_result})
@@ -161,22 +152,18 @@ async def receive_tradingview_alert(payload: WebhookPayload, request: Request):
                 execution_log.append({"action": "open_short", "result": order_result})
 
         logger.info(f"Successfully processed {action.upper()} for {symbol}: {execution_log}")
-        return {
+        return jsonify({
             "success": True,
             "action": action,
             "symbol": symbol,
             "size": order_size,
             "execution_details": execution_log
-        }
+        }), 200
 
     except Exception as e:
         logger.error(f"Error executing trade on Delta Exchange: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Execution error: {str(e)}"
-        )
+        return jsonify({"error": f"Execution error: {str(e)}"}), 500
 
 if __name__ == "__main__":
-    import uvicorn
     port = int(os.getenv("PORT", "8000"))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    app.run(host="0.0.0.0", port=port, debug=False)
