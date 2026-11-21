@@ -35,7 +35,7 @@ delta_client = DeltaExchangeClient(
     base_url=DELTA_BASE_URL
 )
 
-# Autonomous Real-Time Market Streaming Engine
+# Autonomous Delta Market Engine
 engine = MarketEngine(
     delta_client=delta_client,
     symbol=DEFAULT_SYMBOL,
@@ -67,8 +67,8 @@ DASHBOARD_HTML = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Delta Exchange - Autonomous Trading Dashboard</title>
-    <meta http-equiv="refresh" content="5">
+    <title>Delta Exchange - Live Trading Dashboard</title>
+    <meta http-equiv="refresh" content="3">
     <style>
         * { box-sizing: border-box; }
         body {
@@ -201,11 +201,11 @@ DASHBOARD_HTML = """
         <div class="header">
             <div class="title">
                 <h1>Delta Exchange Live Trading Dashboard</h1>
-                <p>Environment: <strong>Demo / Testnet</strong> &bull; Strategy: <strong>SVMKR_UT_HMA_ORB</strong> (UT Bot: Key 2, ATR 1)</p>
+                <p>Exchange: <strong>Delta Exchange Demo</strong> &bull; Instrument: <strong>BTCUSD Perpetual</strong></p>
             </div>
             <div class="badge">
                 <div class="pulse-dot"></div>
-                LIVE FEED (24/7)
+                100% DIRECT DELTA FEED
             </div>
         </div>
 
@@ -220,14 +220,14 @@ DASHBOARD_HTML = """
             <div class="card">
                 <div class="card-label">Available Margin</div>
                 <div class="card-value">${{ account.available_margin }} USD</div>
-                <div class="card-sub">Ready for new orders</div>
+                <div class="card-sub">Ready for orders</div>
             </div>
             <div class="card">
                 <div class="card-label">Total Realized P&L</div>
                 <div class="card-value {% if engine.total_realized_pnl > 0 %}text-green{% elif engine.total_realized_pnl < 0 %}text-red{% endif %}">
                     {% if engine.total_realized_pnl > 0 %}+{% endif %}${{ engine.total_realized_pnl }}
                 </div>
-                <div class="card-sub">From automated strategy trades</div>
+                <div class="card-sub">Net profit/loss</div>
             </div>
             <div class="card">
                 <div class="card-label">Total Trades / Win Rate</div>
@@ -269,18 +269,18 @@ DASHBOARD_HTML = """
             </div>
         </div>
 
-        <!-- SECTION 3: MARKET FEED & INDICATOR STATE -->
-        <div class="section-title">Delta Market Prices & Indicator Signals</div>
+        <!-- SECTION 3: EXACT DELTA PRICES -->
+        <div class="section-title">Exact Delta Exchange Prices (1:1 with Delta)</div>
         <div class="grid-4">
             <div class="card">
-                <div class="card-label">Delta BTC Mark Price</div>
-                <div class="card-value text-blue">${{ engine.delta_mark_price }}</div>
-                <div class="card-sub">Settlement reference price</div>
+                <div class="card-label">Delta Last Traded Price (LTP)</div>
+                <div class="card-value text-blue">${{ engine.delta_ltp }}</div>
+                <div class="card-sub">Exact flashing price on chart</div>
             </div>
             <div class="card">
-                <div class="card-label">Delta Spot Price</div>
-                <div class="card-value">${{ engine.delta_spot_price }}</div>
-                <div class="card-sub">Underlying index</div>
+                <div class="card-label">Delta Mark Price</div>
+                <div class="card-value">${{ engine.delta_mark_price }}</div>
+                <div class="card-sub">Liquidation index price</div>
             </div>
             <div class="card">
                 <div class="card-label">Trailing Stop (UT Bot)</div>
@@ -338,13 +338,13 @@ DASHBOARD_HTML = """
             </table>
             {% else %}
             <p style="color: #94a3b8; font-size: 14px; margin: 0; padding: 12px 0;">
-                No trades executed in this session yet. The bot is actively monitoring live ticks and waiting for the next candle signal!
+                No trades executed in this session yet. Bot is actively watching Delta prices 24/7!
             </p>
             {% endif %}
         </div>
 
         <div class="footer">
-            Page auto-refreshes every 5 seconds &bull; Last tick received at: {{ engine.last_tick_time }} &bull; Powered by Antigravity Python Engine
+            Auto-refreshes every 3 seconds &bull; Last update: {{ engine.last_tick_time }} &bull; Source: Delta Exchange Testnet
         </div>
     </div>
 </body>
@@ -407,7 +407,7 @@ def health_check():
     ensure_engine_started()
     return jsonify({
         "status": "ok",
-        "live_price": engine.delta_mark_price or engine.current_tick_price,
+        "delta_ltp": engine.delta_ltp,
         "timestamp": int(time.time())
     }), 200
 
@@ -461,7 +461,6 @@ def receive_tradingview_alert():
         "trade": trade_entry
     }), 200
 
-# Always start engine
 ensure_engine_started()
 
 if __name__ == "__main__":
