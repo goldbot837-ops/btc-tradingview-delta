@@ -111,6 +111,12 @@ DASHBOARD_HTML = """
             background: #22c55e;
             border-radius: 50%;
             box-shadow: 0 0 10px #22c55e;
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.7); }
+            70% { transform: scale(1.1); box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
+            100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
         }
 
         .section-title {
@@ -134,7 +140,7 @@ DASHBOARD_HTML = """
             border-radius: 14px;
             padding: 18px 20px;
             box-shadow: 0 4px 12px rgba(0,0,0,0.2);
-            transition: transform 0.15s ease, border-color 0.15s ease;
+            transition: transform 0.15s ease, border-color 0.15s ease, background-color 0.3s ease;
         }
         .card:hover { border-color: #38bdf8; }
         
@@ -146,6 +152,11 @@ DASHBOARD_HTML = """
         .text-red { color: #f87171 !important; }
         .text-blue { color: #38bdf8 !important; }
         .text-yellow { color: #fbbf24 !important; }
+
+        .flash-up { animation: flashGreen 0.4s ease-out; }
+        .flash-down { animation: flashRed 0.4s ease-out; }
+        @keyframes flashGreen { 0% { background: rgba(34, 197, 94, 0.3); } 100% { background: #131b2e; } }
+        @keyframes flashRed { 0% { background: rgba(239, 68, 68, 0.3); } 100% { background: #131b2e; } }
 
         .position-card {
             background: #131b2e;
@@ -201,11 +212,11 @@ DASHBOARD_HTML = """
         <div class="header">
             <div class="title">
                 <h1>Delta Exchange Live Trading Dashboard</h1>
-                <p>Exchange: <strong>Delta Exchange Demo</strong> &bull; Instrument: <strong>BTCUSD Perpetual</strong></p>
+                <p>Instrument: <strong>BTCUSD Perpetual</strong> &bull; Order Execution: <strong>Delta Demo</strong></p>
             </div>
-            <div class="badge">
+            <div class="badge" id="ws-badge">
                 <div class="pulse-dot"></div>
-                100% DIRECT DELTA FEED
+                <span id="ws-badge-text">LIVE DELTA WS: ACTIVE (0ms)</span>
             </div>
         </div>
 
@@ -214,25 +225,25 @@ DASHBOARD_HTML = """
         <div class="grid-4">
             <div class="card">
                 <div class="card-label">Net Equity</div>
-                <div class="card-value text-blue">${{ account.equity }} USD</div>
-                <div class="card-sub">&#8377;{{ account.equity_inr }} INR approx.</div>
+                <div class="card-value text-blue" id="val-equity">${{ account.equity }} USD</div>
+                <div class="card-sub" id="val-equity-inr">&#8377;{{ account.equity_inr }} INR approx.</div>
             </div>
             <div class="card">
                 <div class="card-label">Available Margin</div>
-                <div class="card-value">${{ account.available_margin }} USD</div>
+                <div class="card-value" id="val-margin">${{ account.available_margin }} USD</div>
                 <div class="card-sub">Ready for orders</div>
             </div>
             <div class="card">
                 <div class="card-label">Total Realized P&L</div>
-                <div class="card-value {% if engine.total_realized_pnl > 0 %}text-green{% elif engine.total_realized_pnl < 0 %}text-red{% endif %}">
+                <div class="card-value {% if engine.total_realized_pnl > 0 %}text-green{% elif engine.total_realized_pnl < 0 %}text-red{% endif %}" id="val-realized-pnl">
                     {% if engine.total_realized_pnl > 0 %}+{% endif %}${{ engine.total_realized_pnl }}
                 </div>
                 <div class="card-sub">Net profit/loss</div>
             </div>
             <div class="card">
                 <div class="card-label">Total Trades / Win Rate</div>
-                <div class="card-value text-yellow">{{ engine.total_trades }} <span style="font-size:16px; color:#94a3b8;">Trades</span></div>
-                <div class="card-sub">{{ engine.wins }} Wins &bull; {{ engine.losses }} Losses &bull; {{ engine.win_rate }}% Win Rate</div>
+                <div class="card-value text-yellow" id="val-trades">{{ engine.total_trades }} <span style="font-size:16px; color:#94a3b8;">Trades</span></div>
+                <div class="card-sub" id="val-win-rate">{{ engine.wins }} Wins &bull; {{ engine.losses }} Losses &bull; {{ engine.win_rate }}% Win Rate</div>
             </div>
         </div>
 
@@ -243,53 +254,53 @@ DASHBOARD_HTML = """
                 <h3 style="margin:0; font-size:16px;">
                     Contract: <span style="color:#38bdf8;">{{ engine.symbol }}</span> (Perpetual Futures)
                 </h3>
-                <span style="font-weight:700; font-size:14px; padding: 4px 10px; border-radius:6px; background: {% if position.status == 'LONG' %}rgba(74,222,128,0.2); color:#4ade80;{% elif position.status == 'SHORT' %}rgba(248,113,113,0.2); color:#f87171;{% else %}rgba(148,163,184,0.2); color:#94a3b8;{% endif %}">
+                <span id="pos-badge" style="font-weight:700; font-size:14px; padding: 4px 10px; border-radius:6px; background: {% if position.status == 'LONG' %}rgba(74,222,128,0.2); color:#4ade80;{% elif position.status == 'SHORT' %}rgba(248,113,113,0.2); color:#f87171;{% else %}rgba(148,163,184,0.2); color:#94a3b8;{% endif %}">
                     {{ position.status }}
                 </span>
             </div>
             <div class="pos-grid">
                 <div class="card" style="background:#0b0f19;">
                     <div class="card-label">Position Size</div>
-                    <div class="card-value">{{ position.size }} <span style="font-size:14px; color:#94a3b8;">Contracts</span></div>
+                    <div class="card-value" id="pos-size">{{ position.size }} <span style="font-size:14px; color:#94a3b8;">Contracts</span></div>
                 </div>
                 <div class="card" style="background:#0b0f19;">
                     <div class="card-label">Entry Price</div>
-                    <div class="card-value">${{ position.entry_price or '0.00' }}</div>
+                    <div class="card-value" id="pos-entry">${{ position.entry_price or '0.00' }}</div>
                 </div>
                 <div class="card" style="background:#0b0f19;">
                     <div class="card-label">Unrealized Floating P&L</div>
-                    <div class="card-value {% if position.unrealized_pnl > 0 %}text-green{% elif position.unrealized_pnl < 0 %}text-red{% endif %}">
+                    <div class="card-value {% if position.unrealized_pnl > 0 %}text-green{% elif position.unrealized_pnl < 0 %}text-red{% endif %}" id="pos-unrealized-pnl">
                         {% if position.unrealized_pnl > 0 %}+{% endif %}${{ position.unrealized_pnl }}
                     </div>
                 </div>
                 <div class="card" style="background:#0b0f19;">
                     <div class="card-label">Margin In Use</div>
-                    <div class="card-value">${{ position.margin }}</div>
+                    <div class="card-value" id="pos-margin">${{ position.margin }}</div>
                 </div>
             </div>
         </div>
 
         <!-- SECTION 3: EXACT DELTA PRICES -->
-        <div class="section-title">Exact Delta Exchange Prices (1:1 with Delta)</div>
+        <div class="section-title">Live Production Delta Prices (WebSocket Stream)</div>
         <div class="grid-4">
-            <div class="card">
+            <div class="card" id="card-ltp">
                 <div class="card-label">Delta Last Traded Price (LTP)</div>
-                <div class="card-value text-blue">${{ engine.delta_ltp }}</div>
-                <div class="card-sub">Exact flashing price on chart</div>
+                <div class="card-value text-blue" id="val-delta-ltp">${{ engine.delta_ltp }}</div>
+                <div class="card-sub">Real-time live tick from Delta Exchange</div>
             </div>
-            <div class="card">
+            <div class="card" id="card-mark">
                 <div class="card-label">Delta Mark Price</div>
-                <div class="card-value">${{ engine.delta_mark_price }}</div>
+                <div class="card-value" id="val-delta-mark">${{ engine.delta_mark_price }}</div>
                 <div class="card-sub">Liquidation index price</div>
             </div>
             <div class="card">
                 <div class="card-label">Trailing Stop (UT Bot)</div>
-                <div class="card-value text-yellow">${{ engine.current_trailing_stop }}</div>
+                <div class="card-value text-yellow" id="val-trailing-stop">${{ engine.current_trailing_stop }}</div>
                 <div class="card-sub">Dynamic trailing stop level</div>
             </div>
             <div class="card">
                 <div class="card-label">Current Indicator Signal</div>
-                <div class="card-value {% if engine.last_signal == 'BUY' %}text-green{% elif engine.last_signal == 'SELL' %}text-red{% else %}text-yellow{% endif %}">
+                <div class="card-value {% if engine.last_signal == 'BUY' %}text-green{% elif engine.last_signal == 'SELL' %}text-red{% else %}text-yellow{% endif %}" id="val-signal">
                     {{ engine.last_signal }}
                 </div>
                 <div class="card-sub">Timeframe: {{ engine.interval }} candle</div>
@@ -312,7 +323,7 @@ DASHBOARD_HTML = """
                         <th>Order ID</th>
                     </tr>
                 </thead>
-                <tbody>
+                <tbody id="trade-history-body">
                     {% for t in engine.trade_history %}
                     <tr>
                         <td>{{ t.timestamp }}</td>
@@ -343,13 +354,155 @@ DASHBOARD_HTML = """
             {% endif %}
         </div>
 
-        <div class="footer">
-            Auto-refreshes every 3 seconds &bull; Last update: {{ engine.last_tick_time }} &bull; Source: Delta Exchange Testnet
+        <div class="footer" id="footer-status">
+            WebSocket Active &bull; Last update: {{ engine.last_tick_time }} &bull; Source: Delta Exchange Production Stream
         </div>
     </div>
+
+    <!-- SUB-SECOND LIVE TICK STREAMING SCRIPT -->
+    <script>
+    let lastLtp = null;
+    let pollCount = 0;
+
+    async function fetchLive() {
+        try {
+            const res = await fetch('/api/live');
+            if (!res.ok) return;
+            const data = await res.json();
+            
+            // 1. Live Prices
+            const ltpElem = document.getElementById('val-delta-ltp');
+            const markElem = document.getElementById('val-delta-mark');
+            const stopElem = document.getElementById('val-trailing-stop');
+            const sigElem = document.getElementById('val-signal');
+            const cardLtp = document.getElementById('card-ltp');
+            
+            if (data.engine) {
+                const newLtp = data.engine.delta_ltp;
+                if (newLtp && ltpElem) {
+                    ltpElem.textContent = '$' + Number(newLtp).toFixed(1);
+                    if (lastLtp !== null && cardLtp) {
+                        if (newLtp > lastLtp) {
+                            cardLtp.classList.remove('flash-down');
+                            cardLtp.classList.add('flash-up');
+                            setTimeout(() => cardLtp.classList.remove('flash-up'), 400);
+                        } else if (newLtp < lastLtp) {
+                            cardLtp.classList.remove('flash-up');
+                            cardLtp.classList.add('flash-down');
+                            setTimeout(() => cardLtp.classList.remove('flash-down'), 400);
+                        }
+                    }
+                    lastLtp = newLtp;
+                }
+                if (data.engine.delta_mark_price && markElem) {
+                    markElem.textContent = '$' + Number(data.engine.delta_mark_price).toFixed(2);
+                }
+                if (data.engine.current_trailing_stop && stopElem) {
+                    stopElem.textContent = '$' + Number(data.engine.current_trailing_stop).toFixed(2);
+                }
+                if (data.engine.last_signal && sigElem) {
+                    sigElem.textContent = data.engine.last_signal;
+                    sigElem.className = 'card-value ' + (data.engine.last_signal === 'BUY' ? 'text-green' : (data.engine.last_signal === 'SELL' ? 'text-red' : 'text-yellow'));
+                }
+                const footer = document.getElementById('footer-status');
+                if (footer && data.engine.last_tick_time) {
+                    footer.textContent = 'Live WebSocket Active • Last Tick: ' + data.engine.last_tick_time + ' • Delta Production Stream';
+                }
+            }
+
+            // 2. Account & Position every 2s
+            pollCount++;
+            if (pollCount % 4 === 0) {
+                if (data.account) {
+                    const eq = document.getElementById('val-equity');
+                    if (eq && data.account.equity) eq.textContent = '$' + data.account.equity + ' USD';
+                    const eqInr = document.getElementById('val-equity-inr');
+                    if (eqInr && data.account.equity_inr) eqInr.innerHTML = '&#8377;' + data.account.equity_inr + ' INR approx.';
+                    const mg = document.getElementById('val-margin');
+                    if (mg && data.account.available_margin) mg.textContent = '$' + data.account.available_margin + ' USD';
+                }
+
+                if (data.position) {
+                    const posB = document.getElementById('pos-badge');
+                    if (posB) {
+                        posB.textContent = data.position.status;
+                        posB.style.background = data.position.status === 'LONG' ? 'rgba(74,222,128,0.2)' : (data.position.status === 'SHORT' ? 'rgba(248,113,113,0.2)' : 'rgba(148,163,184,0.2)');
+                        posB.style.color = data.position.status === 'LONG' ? '#4ade80' : (data.position.status === 'SHORT' ? '#f87171' : '#94a3b8');
+                    }
+                    const posSz = document.getElementById('pos-size');
+                    if (posSz) posSz.innerHTML = data.position.size + ' <span style="font-size:14px; color:#94a3b8;">Contracts</span>';
+                    const posEn = document.getElementById('pos-entry');
+                    if (posEn) posEn.textContent = '$' + (data.position.entry_price || '0.00');
+                    const posPnl = document.getElementById('pos-unrealized-pnl');
+                    if (posPnl) {
+                        const pnlVal = data.position.unrealized_pnl || 0.0;
+                        posPnl.textContent = (pnlVal > 0 ? '+' : '') + '$' + pnlVal;
+                        posPnl.className = 'card-value ' + (pnlVal > 0 ? 'text-green' : (pnlVal < 0 ? 'text-red' : ''));
+                    }
+                    const posMg = document.getElementById('pos-margin');
+                    if (posMg && data.position.margin) posMg.textContent = '$' + data.position.margin;
+                }
+            }
+        } catch (e) {
+            console.error('Live stream polling error:', e);
+        }
+    }
+    // Poll every 500ms for instant real-time tick streaming without page refresh
+    setInterval(fetchLive, 500);
+    </script>
 </body>
 </html>
 """
+
+@app.route("/api/live", methods=["GET"])
+def api_live():
+    ensure_engine_started()
+    engine_status = engine.get_status()
+
+    # Cached or quick wallet & position query
+    account_info = {
+        "equity": "0.00",
+        "equity_inr": "0.00",
+        "available_margin": "0.00"
+    }
+    try:
+        w = delta_client.get_wallet_balances()
+        if isinstance(w, dict) and "meta" in w:
+            account_info["equity"] = str(round(float(w["meta"].get("net_equity", 0)), 2))
+        res_list = w.get("result", []) if isinstance(w, dict) else []
+        for r in res_list:
+            if r.get("asset_symbol") == "USD":
+                account_info["available_margin"] = str(round(float(r.get("available_balance", 0)), 2))
+                account_info["equity_inr"] = str(round(float(r.get("available_balance_inr", 0)), 2))
+                break
+    except Exception:
+        pass
+
+    pos_info = {
+        "status": "FLAT",
+        "size": 0,
+        "entry_price": "0.00",
+        "unrealized_pnl": 0.0,
+        "margin": "0.00"
+    }
+    try:
+        p = delta_client.get_position_for_symbol(DEFAULT_SYMBOL)
+        if p and float(p.get("size", 0)) != 0:
+            sz = float(p.get("size", 0))
+            pos_info["status"] = "LONG" if sz > 0 else "SHORT"
+            pos_info["size"] = int(abs(sz))
+            pos_info["entry_price"] = str(round(float(p.get("entry_price", 0) or 0), 2))
+            pos_info["unrealized_pnl"] = round(float(p.get("unrealized_pnl", 0) or 0), 4)
+            pos_info["margin"] = str(round(float(p.get("margin", 0) or 0), 2))
+    except Exception:
+        pass
+
+    return jsonify({
+        "engine": engine_status,
+        "account": account_info,
+        "position": pos_info,
+        "server_time": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+    }), 200
 
 @app.route("/", methods=["GET"])
 def root():

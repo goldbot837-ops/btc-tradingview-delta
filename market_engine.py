@@ -130,19 +130,30 @@ class MarketEngine:
         self.trade_history: List[Dict[str, Any]] = []
 
         self.running = False
+        self._delta_ws_thread = None
         self._delta_poll_thread = None
+        self.ws = None
 
     def start(self):
         if self.running:
             return
         self.running = True
         self._sync_history()
+        # 1. Delta Live Native WebSocket for sub-second tick-by-tick streaming
+        self._delta_ws_thread = threading.Thread(target=self._run_delta_ws, daemon=True)
+        self._delta_ws_thread.start()
+        # 2. Backup REST poller (activates only if WebSocket is disconnected)
         self._delta_poll_thread = threading.Thread(target=self._poll_delta_ticker, daemon=True)
         self._delta_poll_thread.start()
-        logger.info(f"MarketEngine started for {self.symbol} on {self.interval} timeframe.")
+        logger.info(f"MarketEngine started with Live WebSocket for {self.symbol} on {self.interval} timeframe.")
 
     def stop(self):
         self.running = False
+        if self.ws:
+            try:
+                self.ws.close()
+            except Exception:
+                pass
 
     def _sync_history(self):
         """Fetch historical candles directly from Delta Exchange."""
@@ -159,24 +170,71 @@ class MarketEngine:
         except Exception as e:
             logger.error(f"Error syncing Delta candles: {e}")
 
-    def _poll_delta_ticker(self):
-        """Polls Delta Exchange every 1 second for exact Last Traded Price (LTP)."""
-        base_url = self.delta_client.base_url
+    def _run_delta_ws(self):
+        """Persistent WebSocket streaming live ticks directly from Delta Exchange production."""
         while self.running:
             try:
-                r = requests.get(f"{base_url}/v2/tickers/{self.symbol}", timeout=3)
-                if r.ok:
-                    res = r.json().get("result", {})
-                    # 'close' is the exact Last Traded Price (LTP) on Delta
-                    ltp = res.get("close")
-                    if ltp is not None:
-                        self.delta_ltp = float(ltp)
-                    self.delta_mark_price = float(res.get("mark_price", self.delta_ltp))
-                    self.delta_spot_price = float(res.get("spot_price", self.delta_ltp))
-                    self.last_tick_timestamp = time.time()
+                def on_message(ws, msg):
+                    try:
+                        d = json.loads(msg)
+                        if d.get("type") == "v2/ticker" and d.get("symbol") == self.symbol:
+                            close_p = d.get("close")
+                            if close_p is not None:
+                                self.delta_ltp = float(close_p)
+                            mark_p = d.get("mark_price")
+                            if mark_p is not None:
+                                self.delta_mark_price = float(mark_p)
+                            spot_p = d.get("spot_price")
+                            if spot_p is not None:
+                                self.delta_spot_price = float(spot_p)
+                            self.last_tick_timestamp = time.time()
+                    except Exception as ex:
+                        logger.debug(f"Delta WS parse error: {ex}")
+
+                def on_open(ws):
+                    sub = {
+                        "type": "subscribe",
+                        "payload": {
+                            "channels": [
+                                {"name": "v2/ticker", "symbols": [self.symbol]}
+                            ]
+                        }
+                    }
+                    ws.send(json.dumps(sub))
+                    logger.info(f"Subscribed to Delta Live WS ticker for {self.symbol}")
+
+                def on_error(ws, err):
+                    logger.warning(f"Delta WS error: {err}")
+
+                self.ws = websocket.WebSocketApp(
+                    "wss://socket.india.delta.exchange",
+                    on_message=on_message,
+                    on_open=on_open,
+                    on_error=on_error
+                )
+                self.ws.run_forever(ping_interval=15, ping_timeout=10)
             except Exception as e:
-                logger.debug(f"Delta ticker error: {e}")
-            time.sleep(1)
+                logger.error(f"Delta WS loop exception: {e}")
+            time.sleep(2)
+
+    def _poll_delta_ticker(self):
+        """Backup poller: triggers only if WebSocket hasn't received a tick in 5 seconds."""
+        while self.running:
+            try:
+                # If WS tick is older than 5 seconds, poll Delta Live REST directly
+                if time.time() - self.last_tick_timestamp > 5:
+                    r = requests.get(f"https://api.india.delta.exchange/v2/tickers/{self.symbol}", timeout=3)
+                    if r.ok:
+                        res = r.json().get("result", {})
+                        ltp = res.get("close")
+                        if ltp is not None:
+                            self.delta_ltp = float(ltp)
+                        self.delta_mark_price = float(res.get("mark_price", self.delta_ltp))
+                        self.delta_spot_price = float(res.get("spot_price", self.delta_ltp))
+                        self.last_tick_timestamp = time.time()
+            except Exception as e:
+                logger.debug(f"Delta ticker backup error: {e}")
+            time.sleep(2)
 
     def get_status(self) -> Dict[str, Any]:
         closed_trades = [t for t in self.trade_history if "pnl" in t and t["pnl"] is not None]
