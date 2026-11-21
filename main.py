@@ -1,6 +1,7 @@
 import os
 import time
 import logging
+import threading
 from typing import Dict, Any
 from flask import Flask, request, jsonify, render_template_string
 from dotenv import load_dotenv
@@ -34,14 +35,28 @@ delta_client = DeltaExchangeClient(
     base_url=DELTA_BASE_URL
 )
 
-# Start Autonomous Real-Time Market Streaming Engine
+# Autonomous Real-Time Market Streaming Engine
 engine = MarketEngine(
     delta_client=delta_client,
     symbol=DEFAULT_SYMBOL,
     interval=TIMEFRAME,
     order_size=DEFAULT_ORDER_SIZE
 )
-engine.start()
+
+_engine_started = False
+_engine_lock = threading.Lock()
+
+def ensure_engine_started():
+    global _engine_started
+    if not _engine_started:
+        with _engine_lock:
+            if not _engine_started:
+                engine.start()
+                _engine_started = True
+
+@app.before_request
+def startup_check():
+    ensure_engine_started()
 
 # In-memory deduplication cache for manual webhook calls
 _recent_alerts: Dict[str, float] = {}
@@ -140,11 +155,13 @@ DASHBOARD_HTML = """
 
 @app.route("/", methods=["GET"])
 def root():
+    ensure_engine_started()
     status = engine.get_status()
     return render_template_string(DASHBOARD_HTML, status=status)
 
 @app.route("/health", methods=["GET"])
 def health_check():
+    ensure_engine_started()
     return jsonify({
         "status": "ok",
         "live_price": engine.current_tick_price,
@@ -153,6 +170,7 @@ def health_check():
 
 @app.route("/status", methods=["GET"])
 def account_status():
+    ensure_engine_started()
     try:
         balance = delta_client.get_wallet_balances()
         positions = delta_client.get_positions()
@@ -169,6 +187,7 @@ def account_status():
 
 @app.route("/webhook", methods=["POST"])
 def receive_tradingview_alert():
+    ensure_engine_started()
     data = request.get_json(force=True, silent=True)
     if not data or not isinstance(data, dict):
         return jsonify({"error": "Invalid or missing JSON payload"}), 400
@@ -199,7 +218,6 @@ def receive_tradingview_alert():
     _recent_alerts[dedup_key] = now
 
     try:
-        # Reversal trade
         close_result = delta_client.close_position(symbol)
         order_result = delta_client.place_order(
             symbol=symbol,
@@ -217,5 +235,6 @@ def receive_tradingview_alert():
         return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
+    ensure_engine_started()
     port = int(os.getenv("PORT", "8000"))
     app.run(host="0.0.0.0", port=port, debug=False)
