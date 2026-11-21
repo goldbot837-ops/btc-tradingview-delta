@@ -118,6 +118,7 @@ class UTBotEngine:
 class MarketEngine:
     """
     Real-time streaming engine connecting live market ticks to Delta Exchange Demo trades.
+    Uses Binance.US / Coinbase feeds for 100% US cloud hosting compatibility.
     """
     def __init__(self, delta_client, symbol: str = "BTCUSD", interval: str = "15m", order_size: int = 1):
         self.delta_client = delta_client
@@ -156,7 +157,7 @@ class MarketEngine:
         return {
             "symbol": self.symbol,
             "interval": self.interval,
-            "live_btc_price": self.current_tick_price,
+            "live_btc_price": round(self.current_tick_price, 2),
             "current_trailing_stop": round(self.ut_bot.trailing_stop, 2),
             "last_signal": self.ut_bot.last_signal,
             "candle_count": len(self.candles),
@@ -165,7 +166,7 @@ class MarketEngine:
         }
 
     def _sync_history(self):
-        url = "https://api.binance.com/api/v3/klines"
+        url = "https://api.binance.us/api/v3/klines"
         binance_symbol = "BTCUSDT" if "BTC" in self.symbol else self.symbol
         params = {"symbol": binance_symbol, "interval": self.interval, "limit": 100}
         try:
@@ -178,7 +179,7 @@ class MarketEngine:
                     latest_raw = raw_candles[-1]
                     self.current_tick_price = float(latest_raw[4])
                     self.last_tick_timestamp = time.time()
-                logger.info(f"Synced {len(self.candles)} historical candles. Initial trailing stop: {self.ut_bot.trailing_stop:.2f}")
+                logger.info(f"Synced {len(self.candles)} historical candles from Binance.US. Initial trailing stop: {self.ut_bot.trailing_stop:.2f}")
             else:
                 logger.error(f"Failed to fetch historical candles: {r.status_code}")
         except Exception as e:
@@ -264,7 +265,7 @@ class MarketEngine:
             try:
                 self._sync_history()
                 binance_symbol = "btcusdt" if "BTC" in self.symbol else self.symbol.lower()
-                ws_url = f"wss://stream.binance.com:9443/ws/{binance_symbol}@kline_{self.interval}"
+                ws_url = f"wss://stream.binance.us:9443/ws/{binance_symbol}@kline_{self.interval}"
                 logger.info(f"Connecting to live tick WebSocket: {ws_url}")
 
                 self.ws = websocket.WebSocketApp(
