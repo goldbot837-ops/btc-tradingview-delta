@@ -234,7 +234,9 @@ def receive_tradingview_alert():
         logger.error(f"Webhook execution error: {e}")
         return jsonify({"error": str(e)}), 500
 
+# Always start engine
+ensure_engine_started()
+
 if __name__ == "__main__":
-    ensure_engine_started()
-    port = int(os.getenv("PORT", "8000"))
+    port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port, debug=False)
