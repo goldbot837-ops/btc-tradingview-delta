@@ -18,8 +18,7 @@ class UTBotEngine:
 
     def compute_all(self, candles: List[List[Any]]) -> List[Dict[str, Any]]:
         results = []
-        stop = 0.0
-        prev_c = 0.0
+        stops = []
 
         for i, c in enumerate(candles):
             high = float(c[2])
@@ -28,32 +27,33 @@ class UTBotEngine:
 
             if i == 0:
                 tr = high - low
+                stop = close - self.a * tr
             else:
-                last_c = float(candles[i - 1][4])
-                tr = max(high - low, abs(high - last_c), abs(low - last_c))
+                prev_c = float(candles[i - 1][4])
+                tr = max(high - low, abs(high - prev_c), abs(low - prev_c))
+                n_loss = self.a * tr
+                prev_stop = stops[i - 1]
 
-            n_loss = self.a * tr
-            src = close
-
-            if i == 0:
-                stop = src - n_loss
-            else:
-                if src > stop and prev_c > stop:
-                    stop = max(stop, src - n_loss)
-                elif src < stop and prev_c < stop:
-                    stop = min(stop, src + n_loss)
-                elif src > stop:
-                    stop = src - n_loss
+                if close > prev_stop and prev_c > prev_stop:
+                    stop = max(prev_stop, close - n_loss)
+                elif close < prev_stop and prev_c < prev_stop:
+                    stop = min(prev_stop, close + n_loss)
+                elif close > prev_stop:
+                    stop = close - n_loss
                 else:
-                    stop = src + n_loss
+                    stop = close + n_loss
+
+            stops.append(stop)
 
             buy_signal = False
             sell_signal = False
             if i > 0:
-                above = (prev_c <= stop) and (src > stop)
-                below = (prev_c >= stop) and (src < stop)
-                buy_signal = (src > stop) and above
-                sell_signal = (src < stop) and below
+                prev_c = float(candles[i - 1][4])
+                prev_stop = stops[i - 1]
+                above = (prev_c <= prev_stop) and (close > stop)
+                below = (prev_c >= prev_stop) and (close < stop)
+                buy_signal = (close > stop) and above
+                sell_signal = (close < stop) and below
 
             sig = "BUY" if buy_signal else ("SELL" if sell_signal else "HOLD")
             results.append({
@@ -62,12 +62,14 @@ class UTBotEngine:
                 "stop": stop,
                 "signal": sig
             })
-            prev_c = close
 
         if results:
             self.trailing_stop = results[-1]["stop"]
             self.prev_close = results[-1]["close"]
-            self.last_signal = results[-1]["signal"]
+            for r in reversed(results):
+                if r["signal"] in ["BUY", "SELL"]:
+                    self.last_signal = r["signal"]
+                    break
 
         return results
 
@@ -79,28 +81,28 @@ class UTBotEngine:
 
         tr = max(high - low, abs(high - prev_c), abs(low - prev_c))
         n_loss = self.a * tr
-        src = close
+        prev_stop = self.trailing_stop
 
-        old_stop = self.trailing_stop
-        if src > old_stop and prev_c > old_stop:
-            new_stop = max(old_stop, src - n_loss)
-        elif src < old_stop and prev_c < old_stop:
-            new_stop = min(old_stop, src + n_loss)
-        elif src > old_stop:
-            new_stop = src - n_loss
+        if close > prev_stop and prev_c > prev_stop:
+            new_stop = max(prev_stop, close - n_loss)
+        elif close < prev_stop and prev_c < prev_stop:
+            new_stop = min(prev_stop, close + n_loss)
+        elif close > prev_stop:
+            new_stop = close - n_loss
         else:
-            new_stop = src + n_loss
+            new_stop = close + n_loss
 
-        above = (prev_c <= old_stop) and (src > new_stop)
-        below = (prev_c >= old_stop) and (src < new_stop)
-        buy_signal = (src > new_stop) and above
-        sell_signal = (src < new_stop) and below
+        above = (prev_c <= prev_stop) and (close > new_stop)
+        below = (prev_c >= prev_stop) and (close < new_stop)
+        buy_signal = (close > new_stop) and above
+        sell_signal = (close < new_stop) and below
 
         signal = "BUY" if buy_signal else ("SELL" if sell_signal else "HOLD")
 
         self.trailing_stop = new_stop
         self.prev_close = close
-        self.last_signal = signal
+        if signal in ["BUY", "SELL"]:
+            self.last_signal = signal
 
         return {
             "timestamp": closed_candle[0],
@@ -127,11 +129,13 @@ class MarketEngine:
         
         self.last_tick_timestamp: float = 0.0
         self.last_evaluated_candle_time: int = 0
+        self.last_executed_signal: Optional[str] = None
         self.trade_history: List[Dict[str, Any]] = []
 
         self.running = False
         self._delta_ws_thread = None
         self._delta_poll_thread = None
+        self._candle_monitor_thread = None
         self.ws = None
 
     def start(self):
@@ -145,7 +149,10 @@ class MarketEngine:
         # 2. Backup REST poller (activates only if WebSocket is disconnected)
         self._delta_poll_thread = threading.Thread(target=self._poll_delta_ticker, daemon=True)
         self._delta_poll_thread.start()
-        logger.info(f"MarketEngine started with Live WebSocket for {self.symbol} on {self.interval} timeframe.")
+        # 3. Autonomous Candle Evaluator (monitors 15m candle closes & auto-trades)
+        self._candle_monitor_thread = threading.Thread(target=self._candle_monitor_loop, daemon=True)
+        self._candle_monitor_thread.start()
+        logger.info(f"MarketEngine started with Autonomous Execution for {self.symbol} on {self.interval} timeframe.")
 
     def stop(self):
         self.running = False
@@ -156,19 +163,66 @@ class MarketEngine:
                 pass
 
     def _sync_history(self):
-        """Fetch historical candles directly from Delta Exchange."""
-        base_url = self.delta_client.base_url
-        try:
-            r = requests.get(f"{base_url}/v2/history/candles", params={"symbol": self.symbol, "resolution": self.interval}, timeout=6)
-            if r.ok:
-                res = r.json().get("result", [])
-                if res:
-                    formatted = [[c.get("time"), c.get("open"), c.get("high"), c.get("low"), c.get("close"), c.get("volume")] for c in res]
-                    self.candles = formatted
-                    self.ut_bot.compute_all(self.candles)
-                    logger.info(f"Synced {len(self.candles)} candles directly from Delta Exchange.")
-        except Exception as e:
-            logger.error(f"Error syncing Delta candles: {e}")
+        """Fetch historical candles directly from Delta Exchange with required start & end."""
+        now = int(time.time())
+        start = now - (86400 * 3) # 3 days of historical candles
+        params = {
+            "symbol": self.symbol,
+            "resolution": self.interval,
+            "start": start,
+            "end": now
+        }
+        for base_url in ["https://api.india.delta.exchange", self.delta_client.base_url]:
+            try:
+                r = requests.get(f"{base_url}/v2/history/candles", params=params, timeout=6)
+                if r.ok:
+                    res = r.json().get("result", [])
+                    if res:
+                        formatted = sorted([[c.get("time"), c.get("open"), c.get("high"), c.get("low"), c.get("close"), c.get("volume")] for c in res], key=lambda x: x[0])
+                        self.candles = formatted
+                        self.ut_bot.compute_all(self.candles)
+                        self.last_evaluated_candle_time = self.candles[-1][0]
+                        self.last_executed_signal = self.ut_bot.last_signal
+                        logger.info(f"Synced {len(self.candles)} candles from Delta. Trailing Stop: ${self.ut_bot.trailing_stop:.2f}, Signal: {self.ut_bot.last_signal}")
+                        break
+            except Exception as e:
+                logger.error(f"Error syncing Delta candles: {e}")
+
+    def _candle_monitor_loop(self):
+        """Autonomous 24/7 engine: polls for new closed candles and auto-executes signals."""
+        while self.running:
+            try:
+                now = int(time.time())
+                start = now - (86400 * 2)
+                params = {
+                    "symbol": self.symbol,
+                    "resolution": self.interval,
+                    "start": start,
+                    "end": now
+                }
+                r = requests.get("https://api.india.delta.exchange/v2/history/candles", params=params, timeout=5)
+                if r.ok:
+                    res = r.json().get("result", [])
+                    if res:
+                        candles = sorted([[c.get("time"), c.get("open"), c.get("high"), c.get("low"), c.get("close"), c.get("volume")] for c in res], key=lambda x: x[0])
+                        latest_bar = candles[-1]
+                        latest_bar_time = latest_bar[0]
+
+                        # Detect if a new candle closed
+                        if latest_bar_time > self.last_evaluated_candle_time:
+                            self.candles = candles
+                            eval_res = self.ut_bot.compute_all(candles)
+                            latest_sig = eval_res[-1]["signal"]
+                            self.last_evaluated_candle_time = latest_bar_time
+                            logger.info(f"[CANDLE CLOSED] Time: {latest_bar_time} Close: {latest_bar[4]} Signal: {latest_sig} Stop: {self.ut_bot.trailing_stop}")
+
+                            if latest_sig in ["BUY", "SELL"] and latest_sig != self.last_executed_signal:
+                                logger.info(f"*** AUTONOMOUS SIGNAL TRIGGERED: {latest_sig} ***")
+                                self.last_executed_signal = latest_sig
+                                self.execute_signal(latest_sig, price=float(latest_bar[4]))
+            except Exception as e:
+                logger.debug(f"Candle monitor loop error: {e}")
+            time.sleep(15)
 
     def _run_delta_ws(self):
         """Persistent WebSocket streaming live ticks directly from Delta Exchange production."""
