@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: delta-tradingview-webhook
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    plan: free
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: DELTA_BASE_URL
+        value: https://cdn-ind.testnet.deltaex.org
+      - key: DEFAULT_SYMBOL
+        value: BTCUSD
+      - key: DEFAULT_ORDER_SIZE
+        value: "1"
+      - key: EXECUTION_MODE
+        value: reversal
+      - key: DELTA_API_KEY
+        sync: false
+      - key: DELTA_API_SECRET
+        sync: false
+      - key: WEBHOOK_PASSPHRASE
+        generateValue: true
