@@ -182,8 +182,18 @@ class MarketEngine:
                         self.candles = formatted
                         self.ut_bot.compute_all(self.candles)
                         self.last_evaluated_candle_time = self.candles[-1][0]
-                        self.last_executed_signal = self.ut_bot.last_signal
                         logger.info(f"Synced {len(self.candles)} candles from Delta. Trailing Stop: ${self.ut_bot.trailing_stop:.2f}, Signal: {self.ut_bot.last_signal}")
+
+                        # If account currently has no open position, enter the confirmed trend immediately
+                        try:
+                            pos = self.delta_client.get_position_for_symbol(self.symbol)
+                            current_size = float(pos.get("size", 0)) if pos else 0.0
+                            if current_size == 0 and self.ut_bot.last_signal in ["BUY", "SELL"]:
+                                logger.info(f"Account is FLAT. Entering active trend: {self.ut_bot.last_signal}")
+                                self.last_executed_signal = self.ut_bot.last_signal
+                                self.execute_signal(self.ut_bot.last_signal)
+                        except Exception as ex:
+                            logger.error(f"Error checking initial position: {ex}")
                         break
             except Exception as e:
                 logger.error(f"Error syncing Delta candles: {e}")
@@ -208,18 +218,20 @@ class MarketEngine:
                         latest_bar = candles[-1]
                         latest_bar_time = latest_bar[0]
 
-                        # Detect if a new candle closed
+                        # Detect if a new candle rolled over
                         if latest_bar_time > self.last_evaluated_candle_time:
                             self.candles = candles
                             eval_res = self.ut_bot.compute_all(candles)
-                            latest_sig = eval_res[-1]["signal"]
+                            # CRITICAL FIX: The candle that JUST closed and completed is index -2
+                            completed_bar = candles[-2] if len(candles) >= 2 else candles[-1]
+                            completed_sig = eval_res[-2]["signal"] if len(eval_res) >= 2 else eval_res[-1]["signal"]
                             self.last_evaluated_candle_time = latest_bar_time
-                            logger.info(f"[CANDLE CLOSED] Time: {latest_bar_time} Close: {latest_bar[4]} Signal: {latest_sig} Stop: {self.ut_bot.trailing_stop}")
+                            logger.info(f"[CANDLE CLOSED] Time: {completed_bar[0]} Close: {completed_bar[4]} Signal: {completed_sig} Stop: {self.ut_bot.trailing_stop}")
 
-                            if latest_sig in ["BUY", "SELL"] and latest_sig != self.last_executed_signal:
-                                logger.info(f"*** AUTONOMOUS SIGNAL TRIGGERED: {latest_sig} ***")
-                                self.last_executed_signal = latest_sig
-                                self.execute_signal(latest_sig, price=float(latest_bar[4]))
+                            if completed_sig in ["BUY", "SELL"] and completed_sig != self.last_executed_signal:
+                                logger.info(f"*** AUTONOMOUS SIGNAL TRIGGERED: {completed_sig} ***")
+                                self.last_executed_signal = completed_sig
+                                self.execute_signal(completed_sig, price=float(completed_bar[4]))
             except Exception as e:
                 logger.debug(f"Candle monitor loop error: {e}")
             time.sleep(15)
