@@ -113,11 +113,12 @@ class UTBotEngine:
 
 
 class MarketEngine:
-    def __init__(self, delta_client, symbol: str = "BTCUSD", interval: str = "15m", order_size: int = 1):
+    def __init__(self, delta_client, symbol: str = "BTCUSD", interval: str = "15m", order_size: int = 1, invert_signals: bool = True):
         self.delta_client = delta_client
         self.symbol = symbol.upper()
         self.interval = interval.lower()
         self.order_size = int(order_size)
+        self.invert_signals = bool(invert_signals)
 
         self.ut_bot = UTBotEngine(key_value=2.0, atr_period=1)
         self.candles: List[List[Any]] = []
@@ -184,16 +185,26 @@ class MarketEngine:
                         self.last_evaluated_candle_time = self.candles[-1][0]
                         logger.info(f"Synced {len(self.candles)} candles from Delta. Trailing Stop: ${self.ut_bot.trailing_stop:.2f}, Signal: {self.ut_bot.last_signal}")
 
-                        # If account currently has no open position, enter the confirmed trend immediately
+                        # Align open position with active trend & inverted strategy on startup
                         try:
                             pos = self.delta_client.get_position_for_symbol(self.symbol)
                             current_size = float(pos.get("size", 0)) if pos else 0.0
-                            if current_size == 0 and self.ut_bot.last_signal in ["BUY", "SELL"]:
-                                logger.info(f"Account is FLAT. Entering active trend: {self.ut_bot.last_signal}")
-                                self.last_executed_signal = self.ut_bot.last_signal
-                                self.execute_signal(self.ut_bot.last_signal)
+                            raw_sig = self.ut_bot.last_signal
+                            if raw_sig in ["BUY", "SELL"]:
+                                target_side = ("sell" if raw_sig == "BUY" else "buy") if self.invert_signals else raw_sig.lower()
+                                if current_size == 0:
+                                    logger.info(f"Account is FLAT. Entering active trend: Raw={raw_sig} -> Target={target_side.upper()} (Invert={self.invert_signals})")
+                                    self.last_executed_signal = raw_sig
+                                    self.execute_signal(raw_sig)
+                                elif (current_size > 0 and target_side == "sell") or (current_size < 0 and target_side == "buy"):
+                                    logger.info(f"Account has position ({current_size}) opposite to target {target_side.upper()}. Reversing position now!")
+                                    self.last_executed_signal = raw_sig
+                                    self.execute_signal(raw_sig)
+                                else:
+                                    logger.info(f"Account position ({current_size}) already aligned with target {target_side.upper()}.")
+                                    self.last_executed_signal = raw_sig
                         except Exception as ex:
-                            logger.error(f"Error checking initial position: {ex}")
+                            logger.error(f"Error checking initial position alignment: {ex}")
                         break
             except Exception as e:
                 logger.error(f"Error syncing Delta candles: {e}")
@@ -310,6 +321,8 @@ class MarketEngine:
         win_rate = round((wins / len(closed_trades) * 100), 1) if closed_trades else 0.0
 
         current_price = self.delta_ltp or self.delta_mark_price
+        raw_sig = self.ut_bot.last_signal
+        target_action = ("SELL (Short)" if raw_sig == "BUY" else ("BUY (Long)" if raw_sig == "SELL" else "HOLD")) if self.invert_signals else raw_sig
 
         return {
             "symbol": self.symbol,
@@ -319,7 +332,10 @@ class MarketEngine:
             "delta_mark_price": round(self.delta_mark_price, 2),
             "delta_spot_price": round(self.delta_spot_price, 2),
             "current_trailing_stop": round(self.ut_bot.trailing_stop, 2),
-            "last_signal": self.ut_bot.last_signal,
+            "last_signal": raw_sig,
+            "target_action": target_action,
+            "invert_signals": self.invert_signals,
+            "strategy_mode": "REVERSED (Buy on Sell / Sell on Buy)" if self.invert_signals else "STANDARD (Direct)",
             "candle_count": len(self.candles),
             "last_tick_time": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(self.last_tick_timestamp or time.time())),
             "total_trades": len(self.trade_history),
@@ -331,12 +347,20 @@ class MarketEngine:
         }
 
     def execute_signal(self, action: str, price: Optional[float] = None) -> Dict[str, Any]:
+        raw_action = action.strip().upper()
+        if self.invert_signals:
+            target_side = "sell" if raw_action == "BUY" else "buy"
+        else:
+            target_side = raw_action.lower()
+
         exec_price = price or self.delta_ltp or self.delta_mark_price
-        logger.info(f"*** EXECUTING SIGNAL: {action.upper()} at ${exec_price:.2f} ***")
+        logger.info(f"*** EXECUTING: Raw Indicator Signal={raw_action} -> Order Side={target_side.upper()} (Invert={self.invert_signals}) at ${exec_price:.2f} ***")
         
         log_entry = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime()),
-            "action": action.upper(),
+            "raw_signal": raw_action,
+            "action": target_side.upper(),
+            "strategy_mode": "INVERTED" if self.invert_signals else "STANDARD",
             "price": round(exec_price, 2),
             "size": self.order_size,
             "status": "pending",
@@ -344,6 +368,16 @@ class MarketEngine:
         }
 
         try:
+            # Check current position first to avoid double entries in the same direction
+            pos = self.delta_client.get_position_for_symbol(self.symbol)
+            current_size = float(pos.get("size", 0)) if pos else 0.0
+
+            if (current_size > 0 and target_side == "buy") or (current_size < 0 and target_side == "sell"):
+                logger.info(f"Already in target position ({current_size} contracts {target_side.upper()}). No reversal needed.")
+                log_entry["status"] = "ALREADY_ACTIVE"
+                self.trade_history.append(log_entry)
+                return log_entry
+
             close_res = self.delta_client.close_position(self.symbol)
             if close_res:
                 meta = close_res.get("result", {}).get("meta_data", {})
@@ -353,11 +387,12 @@ class MarketEngine:
                         log_entry["pnl"] = round(float(pnl), 4)
                     except Exception:
                         pass
+                time.sleep(0.5)
 
             order_res = self.delta_client.place_order(
                 symbol=self.symbol,
                 size=self.order_size,
-                side=action.lower(),
+                side=target_side,
                 order_type="market_order"
             )
             log_entry["status"] = "FILLED"
@@ -366,10 +401,10 @@ class MarketEngine:
             if fill_p:
                 log_entry["price"] = round(float(fill_p), 2)
 
-            logger.info(f"Successfully placed {action.upper()} order on Delta Demo! Result: {order_res}")
+            logger.info(f"Successfully placed {target_side.upper()} order (Inverted from {raw_action}) on Delta Demo! Result: {order_res}")
         except Exception as e:
             log_entry["status"] = f"ERROR: {str(e)}"
-            logger.error(f"Failed to execute {action.upper()} on Delta: {e}")
+            logger.error(f"Failed to execute {target_side.upper()} on Delta: {e}")
 
         self.trade_history.append(log_entry)
         return log_entry

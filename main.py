@@ -25,6 +25,7 @@ DEFAULT_SYMBOL = os.getenv("DEFAULT_SYMBOL", "BTCUSD")
 DEFAULT_ORDER_SIZE = int(os.getenv("DEFAULT_ORDER_SIZE", "1"))
 TIMEFRAME = os.getenv("TIMEFRAME", "15m")
 EXECUTION_MODE = os.getenv("EXECUTION_MODE", "reversal").lower()
+INVERT_SIGNALS = os.getenv("INVERT_SIGNALS", "true").lower() in ["true", "1", "yes"]
 
 app = Flask(__name__)
 
@@ -35,12 +36,13 @@ delta_client = DeltaExchangeClient(
     base_url=DELTA_BASE_URL
 )
 
-# Autonomous Delta Market Engine
+# Autonomous Delta Market Engine (with Inverted Strategy)
 engine = MarketEngine(
     delta_client=delta_client,
     symbol=DEFAULT_SYMBOL,
     interval=TIMEFRAME,
-    order_size=DEFAULT_ORDER_SIZE
+    order_size=DEFAULT_ORDER_SIZE,
+    invert_signals=INVERT_SIGNALS
 )
 
 _engine_started = False
@@ -214,9 +216,14 @@ DASHBOARD_HTML = """
                 <h1>Delta Exchange Live Trading Dashboard</h1>
                 <p>Instrument: <strong>BTCUSD Perpetual</strong> &bull; Order Execution: <strong>Delta Demo</strong></p>
             </div>
-            <div class="badge" id="ws-badge">
-                <div class="pulse-dot"></div>
-                <span id="ws-badge-text">LIVE DELTA WS: ACTIVE (0ms)</span>
+            <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                <div class="badge" id="strategy-badge" style="background: rgba(234, 179, 8, 0.15); color: #fbbf24; border: 1px solid rgba(234, 179, 8, 0.3);">
+                    STRATEGY: REVERSED (CONTRARIAN)
+                </div>
+                <div class="badge" id="ws-badge">
+                    <div class="pulse-dot"></div>
+                    <span id="ws-badge-text">LIVE DELTA WS: ACTIVE (0ms)</span>
+                </div>
             </div>
         </div>
 
@@ -280,8 +287,8 @@ DASHBOARD_HTML = """
             </div>
         </div>
 
-        <!-- SECTION 3: EXACT DELTA PRICES -->
-        <div class="section-title">Live Production Delta Prices (WebSocket Stream)</div>
+        <!-- SECTION 3: EXACT DELTA PRICES & STRATEGY SIGNALS -->
+        <div class="section-title">Live Production Delta Prices &amp; Strategy Signals</div>
         <div class="grid-4">
             <div class="card" id="card-ltp">
                 <div class="card-label">Delta Last Traded Price (LTP)</div>
@@ -299,23 +306,30 @@ DASHBOARD_HTML = """
                 <div class="card-sub">Dynamic trailing stop level</div>
             </div>
             <div class="card">
-                <div class="card-label">Current Indicator Signal</div>
-                <div class="card-value {% if engine.last_signal == 'BUY' %}text-green{% elif engine.last_signal == 'SELL' %}text-red{% else %}text-yellow{% endif %}" id="val-signal">
-                    {{ engine.last_signal }}
+                <div class="card-label">Signal &rarr; Bot Order</div>
+                <div class="card-value" id="val-signal" style="font-size: 20px;">
+                    {% if engine.last_signal == 'BUY' %}
+                        <span class="text-green">BUY</span> &rarr; <span class="text-red">SELL (Short)</span>
+                    {% elif engine.last_signal == 'SELL' %}
+                        <span class="text-red">SELL</span> &rarr; <span class="text-green">BUY (Long)</span>
+                    {% else %}
+                        <span class="text-yellow">{{ engine.last_signal }}</span>
+                    {% endif %}
                 </div>
-                <div class="card-sub">Timeframe: {{ engine.interval }} candle</div>
+                <div class="card-sub" id="val-strategy-sub">Reversed: Buy on Sell / Sell on Buy</div>
             </div>
         </div>
 
         <!-- SECTION 4: TRADE HISTORY LOG -->
-        <div class="section-title">Executed Trade Log</div>
+        <div class="section-title">Executed Trade Log (Reversed Direction)</div>
         <div class="table-card">
             {% if engine.trade_history %}
             <table>
                 <thead>
                     <tr>
                         <th>Time (UTC)</th>
-                        <th>Action</th>
+                        <th>Indicator Signal</th>
+                        <th>Bot Order</th>
                         <th>Fill Price</th>
                         <th>Size</th>
                         <th>Realized P&L</th>
@@ -328,8 +342,13 @@ DASHBOARD_HTML = """
                     <tr>
                         <td>{{ t.timestamp }}</td>
                         <td>
+                            <span class="{% if t.raw_signal == 'BUY' or (not t.raw_signal and t.action == 'SELL') %}tag-buy{% else %}tag-sell{% endif %}">
+                                {{ t.raw_signal or ('BUY' if t.action == 'SELL' else 'SELL') }}
+                            </span>
+                        </td>
+                        <td>
                             <span class="{% if t.action == 'BUY' %}tag-buy{% else %}tag-sell{% endif %}">
-                                {{ t.action }}
+                                {{ t.action }} (Reversed)
                             </span>
                         </td>
                         <td>${{ t.price }}</td>
@@ -401,8 +420,16 @@ DASHBOARD_HTML = """
                     stopElem.textContent = '$' + Number(data.engine.current_trailing_stop).toFixed(2);
                 }
                 if (data.engine.last_signal && sigElem) {
-                    sigElem.textContent = data.engine.last_signal;
-                    sigElem.className = 'card-value ' + (data.engine.last_signal === 'BUY' ? 'text-green' : (data.engine.last_signal === 'SELL' ? 'text-red' : 'text-yellow'));
+                    const raw = data.engine.last_signal;
+                    const tgt = data.engine.target_action || (raw === 'BUY' ? 'SELL (Short)' : 'BUY (Long)');
+                    if (data.engine.invert_signals) {
+                        const rawColor = raw === 'BUY' ? 'text-green' : 'text-red';
+                        const tgtColor = tgt.startsWith('BUY') ? 'text-green' : 'text-red';
+                        sigElem.innerHTML = `<span class="${rawColor}">${raw}</span> &rarr; <span class="${tgtColor}">${tgt}</span>`;
+                    } else {
+                        sigElem.textContent = raw;
+                        sigElem.className = 'card-value ' + (raw === 'BUY' ? 'text-green' : (raw === 'SELL' ? 'text-red' : 'text-yellow'));
+                    }
                 }
                 const footer = document.getElementById('footer-status');
                 if (footer && data.engine.last_tick_time) {
@@ -607,10 +634,12 @@ def receive_tradingview_alert():
 
     _recent_alerts[dedup_key] = now
 
+    engine.last_executed_signal = action.upper()
     trade_entry = engine.execute_signal(action)
     return jsonify({
         "success": True,
-        "action": action,
+        "indicator_signal": action.upper(),
+        "strategy_mode": "INVERTED" if engine.invert_signals else "STANDARD",
         "trade": trade_entry
     }), 200
 
